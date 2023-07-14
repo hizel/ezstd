@@ -14,7 +14,11 @@
     decompress_using_ddict/2,
     get_dict_id_from_frame/1,
     get_dict_id_from_ddict/1,
-    get_dict_id_from_cdict/1
+    get_dict_id_from_cdict/1,
+
+    create_compress_stream/1,
+    compress_stream/2,
+    decompress_stream_onepass/1
 ]).
 
 -spec create_cdict(binary(), integer()) -> reference() | {error, any()}.
@@ -73,3 +77,15 @@ returns_integers(Value) ->
         Other ->
             error(Other)
     end.
+
+-spec create_compress_stream(integer()) -> {ok, reference()} | {error, any()}.
+create_compress_stream(CompressionLevel) ->
+    ezstd_nif:create_compress_stream(CompressionLevel).
+
+-spec compress_stream(reference(), binary()|flush) -> binary() | {error, any()}.
+compress_stream(CStream, Bin) ->
+    ezstd_nif:compress_stream(CStream, Bin).
+
+-spec decompress_stream_onepass(binary()) -> binary() | {error, any()}.
+decompress_stream_onepass(Bin) ->
+    ezstd_nif:decompress_stream_onepass(Bin).

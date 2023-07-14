@@ -5,10 +5,16 @@
 #include <stdlib.h>
 #include <zstd.h>
 
+const char kAtomError[] = "error";
+const char kAtomBadArg[] = "badarg";
+
 struct atoms ATOMS;
 
 ErlNifResourceType *COMPRESS_DICTIONARY_RES_TYPE;
 ErlNifResourceType *DECOMPRESS_DICTIONARY_RES_TYPE;
+ErlNifResourceType *STREAM_COMPRESS_RES_TYPE;
+//ErlNifResourceType *STREAM_DECOMPRESS_RES_TYPE;
+
 
 void zstd_nif_compress_dictionary_destructor(ErlNifEnv *env, void *res) {
     UNUSED(env);
@@ -22,19 +28,32 @@ void zstd_nif_decompress_dictionary_destructor(ErlNifEnv *env, void *res) {
     ZSTD_freeDDict(*dict_resource);
 }
 
+void zstd_nif_stream_compress_destructor(ErlNifEnv *env, void *res) {
+    UNUSED(env);
+    ZSTD_CStream** stream_resource = (ZSTD_CStream**)res;
+    ZSTD_freeCStream(*stream_resource);
+}
+
+/*void zstd_nif_stream_decompress_destructor(ErlNifEnv *env, void *res) {
+    UNUSED(env);
+    ZSTD_DStream** stream_resource = (ZSTD_DStream**)res;
+    ZSTD_freeDStream(*stream_resource);
+}*/
 
 int on_nif_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info) {
     UNUSED(load_info);
     UNUSED(priv_data);
 
-    ATOMS.atomError = make_atom(env, "error");
-    ATOMS.atomBadArg = make_atom(env, "badarg");
+    ATOMS.atomError = make_atom(env, kAtomError);
+    ATOMS.atomBadArg = make_atom(env, kAtomBadArg);
     ATOMS.atomOk = make_atom(env, "ok");
     ATOMS.atomFlush = make_atom(env, "flush");
 
     ErlNifResourceFlags flags = ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER;
     COMPRESS_DICTIONARY_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.CompressDictionary", zstd_nif_compress_dictionary_destructor, flags, NULL);
     DECOMPRESS_DICTIONARY_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.DecompressDictionary", zstd_nif_decompress_dictionary_destructor, flags, NULL);
+    STREAM_COMPRESS_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.StreamCompress", zstd_nif_stream_compress_destructor, flags, NULL);
+    //STREAM_DECOMPRESS_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.StreamDecompress", zstd_nif_stream_decompress_destructor, flags, NULL);
 
     return 0;
 }
@@ -273,6 +292,140 @@ static ERL_NIF_TERM zstd_nif_decompress(ErlNifEnv* env, int argc, const ERL_NIF_
     return out_term;
 }
 
+static ERL_NIF_TERM zstd_nif_create_compress_stream(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 1)
+        return make_badarg(env);
+    
+    int compression_level;
+
+    ZSTD_CStream *ctx = ZSTD_createCStream();
+
+    if(!enif_get_int(env, argv[0], &compression_level) ||
+       compression_level > ZSTD_maxCLevel() || 
+       compression_level < ZSTD_minCLevel()) {
+            return make_badarg(env);
+    }
+    if (!ZSTD_CCtx_setParameter(ctx, ZSTD_c_compressionLevel, compression_level)) {
+        ZSTD_freeCStream(ctx);
+        return make_error(env, "failed set param");
+    }
+    if (!ZSTD_CCtx_setParameter(ctx, ZSTD_c_checksumFlag, 1)) {
+        ZSTD_freeCStream(ctx);
+        return make_error(env, "failed set param");
+    }
+
+    ZSTD_CStream** resource = (ZSTD_CStream**)enif_alloc_resource(STREAM_COMPRESS_RES_TYPE, sizeof(ZSTD_CStream*));
+    *resource = ctx;
+
+    ERL_NIF_TERM result = enif_make_tuple2(env, ATOMS.atomOk, enif_make_resource(env, resource));
+
+    enif_release_resource(resource);
+    return result;
+}
+
+static ERL_NIF_TERM zstd_nif_compress_stream(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 2)
+        return make_badarg(env);
+
+    ZSTD_CStream **ctx = NULL;
+    ErlNifBinary bin, out_bin;
+
+    if (!enif_get_resource(env, argv[0], STREAM_COMPRESS_RES_TYPE, (void**)(&ctx)))
+        return make_badarg(env);
+
+    if (argv[1] != ATOMS.atomFlush && !enif_inspect_binary(env, argv[1], &bin))
+        return make_badarg(env);
+
+
+    if (argv[1] != ATOMS.atomFlush && bin.size == 0) 
+        return argv[1]; // compres 0 is 0
+
+    if (argv[1] == ATOMS.atomFlush) {
+        bin.size = 0;
+        bin.data = NULL;
+    }
+
+    if (!enif_alloc_binary(ZSTD_CStreamOutSize(), &out_bin))
+        return make_error(env, "failed to alloc");
+
+    ZSTD_EndDirective const mode = bin.size == 0 ? ZSTD_e_end : ZSTD_e_continue;
+
+    ZSTD_inBuffer input = {.src = bin.data, .size = bin.size, .pos = 0};
+    ZSTD_outBuffer output = {.dst = out_bin.data, .size = out_bin.size, .pos = 0};
+    int finished;
+    do {
+        size_t const remaining = ZSTD_compressStream2(*ctx, &output, &input, mode);
+        if (output.pos == output.size) {
+            if (!enif_realloc_binary(&out_bin, out_bin.size + ZSTD_CStreamOutSize())) {
+                return make_error(env, "failed to alloc");
+            }
+            output.dst = out_bin.data;
+            output.size = out_bin.size;
+        }
+        finished = bin.size == 0 ? (remaining == 0) : (input.pos == input.size);
+    } while (!finished);
+
+    if (!enif_realloc_binary(&out_bin, output.pos))
+        return make_error(env, "failed to alloc");
+
+    return enif_make_binary(env, &out_bin);
+}
+
+static ERL_NIF_TERM zstd_nif_decompress_stream_onepass(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 1)
+        return make_badarg(env);
+
+    ErlNifBinary bin, out_bin;
+    ZSTD_DStream *ctx;
+    ERL_NIF_TERM ret;
+
+    if(!enif_inspect_binary(env, argv[0], &bin))
+        return make_badarg(env);
+
+    if (bin.size == 0) {
+        ret = argv[0];
+        goto out;
+    }
+
+    ctx = ZSTD_createDStream();
+
+    if (!enif_alloc_binary(bin.size, &out_bin)) {
+        ret = make_error(env, "failed to alloc");
+        goto out;
+    }
+
+    ZSTD_outBuffer output = {.dst = out_bin.data, .pos = 0, .size = out_bin.size};
+    ZSTD_inBuffer input = {.src = bin.data, .size = bin.size, .pos = 0};
+
+    do {
+        size_t ret = ZSTD_decompressStream(ctx, &output, &input);
+        if (ZSTD_isError(ret)) {
+            ret = make_error(env, "failed decompress");
+            goto out;
+        }
+        if (output.size == output.pos && input.pos != input.size) {
+            if (!enif_realloc_binary(&out_bin, out_bin.size + ZSTD_DStreamOutSize())) {
+                ret = make_error(env, "failed to realloc");
+                goto out;
+            }
+            output.dst = out_bin.data;
+            output.size = out_bin.size;
+        }
+    } while (input.pos != input.size);
+
+    if (out_bin.size > output.pos) {
+        if (!enif_realloc_binary(&out_bin, output.pos)) {
+            ret = make_error(env, "failed to realloc");
+            goto out;
+        }
+    }
+
+    ret = enif_make_binary(env, &out_bin);
+
+out:
+    ZSTD_freeDStream(ctx);
+    return ret;
+}
 
 
 static ErlNifFunc nif_funcs[] = {
@@ -284,7 +437,11 @@ static ErlNifFunc nif_funcs[] = {
     {"get_dict_id_from_cdict", 1, zstd_nif_get_dict_id_from_cdict},
     {"get_dict_id_from_frame", 1, zstd_nif_get_dict_id_from_frame},
     {"compress_using_cdict", 2, zstd_nif_compress_using_cdict, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"decompress_using_ddict", 2, zstd_nif_decompress_using_ddict, ERL_NIF_DIRTY_JOB_CPU_BOUND}
+    {"decompress_using_ddict", 2, zstd_nif_decompress_using_ddict, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"create_compress_stream", 1, zstd_nif_create_compress_stream, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"compress_stream", 2, zstd_nif_compress_stream, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"decompress_stream_onepass", 1, zstd_nif_decompress_stream_onepass, ERL_NIF_DIRTY_JOB_CPU_BOUND}
+
 };
 
 ERL_NIF_INIT(ezstd_nif, nif_funcs, on_nif_load, NULL, NULL, NULL);

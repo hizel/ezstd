@@ -14,7 +14,11 @@
     decompress_using_ddict/2,
     get_dict_id_from_cdict/1,
     get_dict_id_from_ddict/1,
-    get_dict_id_from_frame/1
+    get_dict_id_from_frame/1,
+
+    create_compress_stream/1,
+    compress_stream/2,
+    decompress_stream_onepass/1
 ]).
 
 %% nif functions
@@ -61,4 +65,13 @@ get_dict_id_from_ddict(_DDict) ->
     ?NOT_LOADED.
 
 get_dict_id_from_frame(_Binary) ->
+    ?NOT_LOADED.
+
+create_compress_stream(_CompressionLevel) ->
+    ?NOT_LOADED.
+
+compress_stream(_CStream, _Bin) ->
+    ?NOT_LOADED.
+
+decompress_stream_onepass(_Bin) ->
     ?NOT_LOADED.
