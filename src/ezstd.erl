@@ -18,7 +18,11 @@
 
     create_compress_stream/1,
     compress_stream/2,
-    decompress_stream_onepass/1
+    decompress_stream_onepass/1,
+
+    create_compressed_storage/2,
+    compress_to_storage/2,
+    flush_compressed_storage/1
 ]).
 
 -spec create_cdict(binary(), integer()) -> reference() | {error, any()}.
@@ -89,3 +93,15 @@ compress_stream(CStream, Bin) ->
 -spec decompress_stream_onepass(binary()) -> binary() | {error, any()}.
 decompress_stream_onepass(Bin) ->
     ezstd_nif:decompress_stream_onepass(Bin).
+
+-spec create_compressed_storage(integer(), non_neg_integer()) -> {ok, reference()} | {error, any()}.
+create_compressed_storage(CompressionLevel, CapacityStep) ->
+    ezstd_nif:create_compressed_storage(CompressionLevel, CapacityStep).
+
+-spec compress_to_storage(reference(), binary()) -> ok | {error, any()}.
+compress_to_storage(Ctx, Bin) ->
+    ezstd_nif:compress_to_storage(Ctx, Bin).
+
+-spec flush_compressed_storage(reference()) -> {ok, binary()} | {error, any()}.
+flush_compressed_storage(Ctx) ->
+    ezstd_nif:flush_compressed_storage(Ctx).

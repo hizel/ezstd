@@ -9,7 +9,8 @@ all() -> [
     roundtrip_content_using_real_dictionary_test,
     roundtrip_normal_compression_test,
     streaming_test1,
-    streaming_test2
+    streaming_test2,
+    storage_test
 ].
 
 roundtrip_normal_compression_test(_) ->
@@ -73,6 +74,23 @@ streaming_test0(Len, Pattern) ->
   Input = iolist_to_binary(lists:reverse(InList)),
 
   {error, _} = ezstd:decompress(Compress),
+
+  Input = ezstd:decompress_stream_onepass(Compress),
+
+  ok.
+
+  storage_test(_) ->
+  {ok, Ctx} = ezstd:create_compressed_storage(1, 1_000_000),
+
+  InList = lists:foldl(fun(_, InAcc) ->
+    Bin = crypto:strong_rand_bytes(100_000),
+    {ok, _} = ezstd:compress_to_storage(Ctx, Bin),
+    [Bin|InAcc]
+  end, [], lists:seq(1, 20)),
+
+  Input = iolist_to_binary(lists:reverse(InList)),
+
+  {ok, Compress} = ezstd:flush_compressed_storage(Ctx),
 
   Input = ezstd:decompress_stream_onepass(Compress),
 

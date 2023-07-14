@@ -13,7 +13,14 @@ struct atoms ATOMS;
 ErlNifResourceType *COMPRESS_DICTIONARY_RES_TYPE;
 ErlNifResourceType *DECOMPRESS_DICTIONARY_RES_TYPE;
 ErlNifResourceType *STREAM_COMPRESS_RES_TYPE;
-//ErlNifResourceType *STREAM_DECOMPRESS_RES_TYPE;
+ErlNifResourceType *STREAM_COMPRESS_STORAGE_RES_TYPE;
+
+struct stream_compress_storage {
+    ZSTD_CStream *stream;
+    ErlNifBinary bin;
+    size_t pos;
+    unsigned capacity_step;
+};
 
 
 void zstd_nif_compress_dictionary_destructor(ErlNifEnv *env, void *res) {
@@ -34,11 +41,12 @@ void zstd_nif_stream_compress_destructor(ErlNifEnv *env, void *res) {
     ZSTD_freeCStream(*stream_resource);
 }
 
-/*void zstd_nif_stream_decompress_destructor(ErlNifEnv *env, void *res) {
+void zstd_nif_stream_compress_storage_destructor(ErlNifEnv *env, void *res) {
     UNUSED(env);
-    ZSTD_DStream** stream_resource = (ZSTD_DStream**)res;
-    ZSTD_freeDStream(*stream_resource);
-}*/
+    struct stream_compress_storage *s = (struct stream_compress_storage*)res;
+    if (s->stream) ZSTD_freeCStream(s->stream);
+    if (s->bin.size > 0) enif_release_binary(&s->bin);
+}
 
 int on_nif_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info) {
     UNUSED(load_info);
@@ -53,7 +61,7 @@ int on_nif_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info) {
     COMPRESS_DICTIONARY_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.CompressDictionary", zstd_nif_compress_dictionary_destructor, flags, NULL);
     DECOMPRESS_DICTIONARY_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.DecompressDictionary", zstd_nif_decompress_dictionary_destructor, flags, NULL);
     STREAM_COMPRESS_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.StreamCompress", zstd_nif_stream_compress_destructor, flags, NULL);
-    //STREAM_DECOMPRESS_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.StreamDecompress", zstd_nif_stream_decompress_destructor, flags, NULL);
+    STREAM_COMPRESS_STORAGE_RES_TYPE = enif_open_resource_type(env, NULL, "ZStandard.StreamStorage", zstd_nif_stream_compress_storage_destructor, flags, NULL);
 
     return 0;
 }
@@ -428,6 +436,136 @@ out:
 }
 
 
+static ERL_NIF_TERM zstd_nif_create_compressed_storage(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 2)
+        return make_badarg(env);
+
+    int compression_level;
+    unsigned capacity_step;
+    ERL_NIF_TERM ret;
+
+    ZSTD_CStream *ctx = ZSTD_createCStream();
+
+    if(!enif_get_int(env, argv[0], &compression_level) ||
+       compression_level > ZSTD_maxCLevel() || 
+       compression_level < ZSTD_minCLevel()) {
+            return make_badarg(env);
+    }
+
+    if (!enif_get_uint(env, argv[1], &capacity_step)) {
+        return make_badarg(env);
+    }
+
+
+    if (!ZSTD_CCtx_setParameter(ctx, ZSTD_c_compressionLevel, compression_level)) {
+        ZSTD_freeCStream(ctx);
+        return make_error(env, "failed set param");
+    }
+    if (!ZSTD_CCtx_setParameter(ctx, ZSTD_c_checksumFlag, 1)) {
+        ZSTD_freeCStream(ctx);
+        return make_error(env, "failed set param");
+    }
+
+    struct stream_compress_storage *s = (struct stream_compress_storage *)enif_alloc_resource(STREAM_COMPRESS_STORAGE_RES_TYPE, sizeof(struct stream_compress_storage));
+    s->bin.data = 0;
+    s->bin.size = 0;
+    s->pos = 0;
+    s->stream = ctx;
+
+    if (!enif_alloc_binary(capacity_step, &s->bin)) {
+        s->bin.size = 0;
+        ret = make_error(env, "failed to realloc");
+        goto out;
+    }
+
+    ret = enif_make_tuple2(env, ATOMS.atomOk, enif_make_resource(env, s));
+
+out:
+    enif_release_resource(s);
+    return ret;
+}
+
+
+static ERL_NIF_TERM zstd_nif_compress_to_storage(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 2)
+        return make_badarg(env);
+
+    struct stream_compress_storage *s;
+    ErlNifBinary bin;
+
+    if (!enif_get_resource(env, argv[0], STREAM_COMPRESS_STORAGE_RES_TYPE, (void**)&s))
+        return make_badarg(env);
+
+    if (!enif_inspect_binary(env, argv[1], &bin))
+        return make_badarg(env);
+
+    if (s->bin.size == 0)
+        return make_error(env, "bad stream storage");
+
+    if (s->pos == s->bin.size) {
+        if (!enif_realloc_binary(&s->bin, s->bin.size + s->capacity_step))
+            return make_error(env, "failed to realloc");
+    }
+
+    ZSTD_inBuffer input = {.src = bin.data, .size = bin.size, .pos = 0};
+    ZSTD_outBuffer output = {.dst = s->bin.data, .size = s->bin.size, .pos = s->pos};
+    do {
+        /*size_t const remaining =*/ ZSTD_compressStream2(s->stream, &output, &input, ZSTD_e_continue);
+        if (output.pos == output.size) {
+            if (!enif_realloc_binary(&s->bin, s->bin.size + s->capacity_step)) {
+                return make_error(env, "failed to realloc");
+            }
+            output.dst = s->bin.data;
+            output.size = s->bin.size;
+        }
+    } while (input.pos != input.size);
+    s->pos = output.pos;
+
+    return enif_make_tuple2(env, ATOMS.atomOk, enif_make_uint(env, s->pos));
+}
+
+static ERL_NIF_TERM zstd_flush_compressed_storage(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 1)
+        return make_badarg(env);
+
+    struct stream_compress_storage *s;
+
+    if (!enif_get_resource(env, argv[0], STREAM_COMPRESS_STORAGE_RES_TYPE, (void**)&s))
+        return make_badarg(env);
+
+    if (s->bin.size == 0)
+        return make_error(env, "bad stream storage");
+
+    ZSTD_inBuffer input = {.src = NULL, .size = 0, .pos = 0};
+    ZSTD_outBuffer output = {.dst = s->bin.data, .size = s->bin.size, .pos = s->pos};
+    int finished;
+    do {
+        size_t const remaining = ZSTD_compressStream2(s->stream, &output, &input, ZSTD_e_end);
+        if (output.pos == output.size) {
+            if (!enif_realloc_binary(&s->bin, s->bin.size + s->capacity_step)) {
+                return make_error(env, "failed to realloc");
+            }
+            output.dst = s->bin.data;
+            output.size = s->bin.size;
+            finished = remaining == 0;
+        }
+    } while (!finished);
+    s->pos = output.pos;
+
+    if (!enif_realloc_binary(&s->bin, s->pos))
+        return make_error(env, "failed to realloc");
+
+    ERL_NIF_TERM bin_term = enif_make_binary(env, &s->bin);
+
+    if (!enif_alloc_binary(s->bin.size, &s->bin))
+        return make_error(env, "failed to alloc");
+
+    s->pos = 0;
+    return enif_make_tuple2(env, ATOMS.atomOk, bin_term);
+}
+
+
+
 static ErlNifFunc nif_funcs[] = {
     {"compress", 2, zstd_nif_compress, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"decompress", 1, zstd_nif_decompress, ERL_NIF_DIRTY_JOB_CPU_BOUND},
@@ -438,9 +576,14 @@ static ErlNifFunc nif_funcs[] = {
     {"get_dict_id_from_frame", 1, zstd_nif_get_dict_id_from_frame},
     {"compress_using_cdict", 2, zstd_nif_compress_using_cdict, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"decompress_using_ddict", 2, zstd_nif_decompress_using_ddict, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"create_compress_stream", 1, zstd_nif_create_compress_stream, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+
+    {"create_compress_stream", 1, zstd_nif_create_compress_stream},
     {"compress_stream", 2, zstd_nif_compress_stream, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"decompress_stream_onepass", 1, zstd_nif_decompress_stream_onepass, ERL_NIF_DIRTY_JOB_CPU_BOUND}
+    {"decompress_stream_onepass", 1, zstd_nif_decompress_stream_onepass, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+
+    {"create_compressed_storage", 2, zstd_nif_create_compressed_storage},
+    {"compress_to_storage", 2, zstd_nif_compress_to_storage, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"flush_compressed_storage", 1, zstd_flush_compressed_storage, ERL_NIF_DIRTY_JOB_CPU_BOUND}
 
 };
 

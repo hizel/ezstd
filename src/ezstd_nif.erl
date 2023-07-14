@@ -18,7 +18,11 @@
 
     create_compress_stream/1,
     compress_stream/2,
-    decompress_stream_onepass/1
+    decompress_stream_onepass/1,
+
+    create_compressed_storage/2,
+    compress_to_storage/2,
+    flush_compressed_storage/1
 ]).
 
 %% nif functions
@@ -74,4 +78,13 @@ compress_stream(_CStream, _Bin) ->
     ?NOT_LOADED.
 
 decompress_stream_onepass(_Bin) ->
+    ?NOT_LOADED.
+
+create_compressed_storage(_CompressionLevel, _CapacityStep) ->
+    ?NOT_LOADED.
+
+compress_to_storage(_Ctx, _Bin) ->
+    ?NOT_LOADED.
+
+flush_compressed_storage(_Ctx) ->
     ?NOT_LOADED.
