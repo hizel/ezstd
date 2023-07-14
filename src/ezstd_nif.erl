@@ -15,7 +15,6 @@
     get_dict_id_from_cdict/1,
     get_dict_id_from_ddict/1,
     get_dict_id_from_frame/1
-
 ]).
 
 %% nif functions

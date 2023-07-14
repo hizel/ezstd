@@ -54,8 +54,8 @@ BuildLibrary()
 {
     case $OS in
         Linux)
-            export CFLAGS="-fPIC"
-            export CXXFLAGS="-fPIC"
+            export CFLAGS="-fPIC -g -ggdb"
+            export CXXFLAGS="-fPIC -g -ggdb"
             ;;
         *)
             ;;

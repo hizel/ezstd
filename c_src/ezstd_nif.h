@@ -7,9 +7,10 @@ struct atoms
 {
     ERL_NIF_TERM atomError;
     ERL_NIF_TERM atomBadArg;
+    ERL_NIF_TERM atomOk;
+    ERL_NIF_TERM atomFlush;
 };
 
-extern atoms ATOMS;
+extern struct atoms ATOMS;
 
 #endif  // C_SRC_EZSTD_NIF_H_
-

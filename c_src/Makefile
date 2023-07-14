@@ -18,12 +18,10 @@ ifeq ($(UNAME_SYS), darwin)
                                 -Wl,-U,_enif_make_uint
 
 endif
-
-CXXFLAGS += -DNDEBUG \
+#-DNDEBUG
+CFLAGS += -O0 \
 			-I$(BASEDIR)/_build/deps/zstd/lib \
-			-g -Wextra -Werror -Wno-missing-field-initializers -fno-exceptions -fno-rtti -std=c++11
+			-g -ggdb -Wextra -Werror -Wno-missing-field-initializers
 
 LDFLAGS  += -L$(BASEDIR)/_build/deps/zstd/lib \
-			-lzstd \
-			-lstdc++		
-
+			-lzstd			
